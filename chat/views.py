@@ -1,18 +1,24 @@
+import random
+import threading
 from rest_framework import viewsets, permissions, filters, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.models import User
-from django.contrib.auth import get_user_model
+from django.contrib.auth import authenticate
 from django_filters.rest_framework import DjangoFilterBackend
 from django_filters import rest_framework as djfilters
 from .models import Chat, Message
-from .serializers import UserSerializer, ChatSerializer, MessageSerializer
+from .serializers import UserSerializer, ChatSerializer, MessageSerializer, RegisterSerializer, VerifyCodeSerializer, \
+    LoginSerializer, ResendVerificationCodeSerializer
 from .permissions import IsChatParticipant
-from .utils import send_chat_message_email
+from .utils import send_chat_message_email, generate_verification_code, \
+    store_verification_code, redis_client
+from custom_user.models import CustomUser
+from .tasks import send_verification_email
 
-# User = get_user_model()
 
 class ChatFilter(djfilters.FilterSet):
     user1_id = djfilters.NumberFilter(field_name="user1__id")
@@ -36,7 +42,8 @@ class ChatViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         # Override the default queryset to return only chats that the requesting user is a participant of.
         user_id = self.request.user.id
-        return Chat.objects.filter(user1_id=user_id).select_related('user1', 'user2') | Chat.objects.filter(user2_id=user_id).select_related('user1', 'user2')
+        return Chat.objects.filter(user1_id=user_id).select_related('user1', 'user2') | Chat.objects.filter(
+            user2_id=user_id).select_related('user1', 'user2')
 
     def perform_create(self, serializer):
         # Override the perform_create method to save a new chat with the authenticated user and another specified user.
@@ -121,20 +128,120 @@ class MessageViewSet(viewsets.ModelViewSet):
 
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def send_chat_email(request, chat_id):
-    user = request.user
-    try:
-        chat = Chat.objects.get(id=chat_id)
-        if user not in [chat.user1, chat.user2]:
-            return Response({"detail": "You do not have permission to view this chat."}, status=status.HTTP_403_FORBIDDEN)
+@permission_classes([AllowAny])
+def verify_code(request):
+    serializer = VerifyCodeSerializer(data=request.data)
+    # email = request.data.get('email')
+    # code = request.data.get('code')
 
-        messages = Message.objects.filter(chat=chat).order_by('timestamp')
-        message_texts = "\n".join([f"{msg.author.email}: {msg.content}" for msg in messages])
+    if serializer.is_valid():
+        email = serializer.validated_data['email']
+        code = serializer.validated_data['code']
+        stored_code = redis_client.get(f'verification_code:{email}')
+        # if not email or not code:
+        #     return Response({"detail": "Email and verification code are required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        subject = f"Chat messages between {chat.user1.email} and {chat.user2.email}"
-        send_chat_message_email(user.email, subject, message_texts)
+        if stored_code and stored_code.decode('utf-8') == code:
+            user = CustomUser.objects.get(email=email)
+            user.is_active = True
+            user.save()
+            redis_client.delete(f"verification_code:{email}")
+            return Response({'detail': 'Email verified successfully'}, status=status.HTTP_200_OK)
+        return Response({'detail': 'Invalid or expired verification code'}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response({"detail": "Email sent successfully."}, status=status.HTTP_200_OK)
-    except Chat.DoesNotExist:
-        return Response({"detail": "Chat not found"}, status=status.HTTP_404_NOT_FOUND)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def register(request):
+    # email = request.data.get('email')
+    # password = request.data.get('password')  # use serializers to do this
+    serializer = RegisterSerializer(data=request.data)
+
+    serializer.is_valid(raise_exception=True)
+    user = serializer.save(is_active=False)
+    code = generate_verification_code()
+    if not user.email or not user.password:
+        return Response({"detail": "Email and password are required."}, status=status.HTTP_400_BAD_REQUEST)
+    # store_verification_code(user.email, code)
+    # send_verification_email(user.email, code)  # should run in another thread
+
+    # threading
+    # t1 = threading.Thread(target=store_verification_code, args=(user.email, code))
+    # t2 = threading.Thread(target=send_verification_email, args=(user.email, code))
+    # t1.start()
+    # t2.start()
+
+    # celery background task for email, not threading.
+    # celery:
+    send_verification_email.delay(user.email, code)
+    # use docker desktop - Can't run docker desktop because my Ubuntu 24.04 LTS won't support it.
+    return Response(
+        {
+            "detail": "User registered. Please verify your email to activate your account"
+        }, status=status.HTTP_201_CREATED)
+# use docker desktop, so you don't have to stop redis and postgresql to run docker.
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def login(request):
+    serializer = LoginSerializer(data=request.data)
+    if serializer.is_valid():
+        # email = request.data.get('email')
+        # password = request.data.get('password')
+        email = serializer.validated_data['email']
+        password = serializer.validated_data['password']
+        user = authenticate(email=email, password=password)
+
+        if user is not None:
+            if user.is_active:
+                refresh = RefreshToken.for_user(user)
+                return Response({
+                    'refresh': str(refresh),
+                    'access': str(refresh.access_token),
+                })
+            return Response({"detail": "Email not verified"}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"detail": "Invalid email or password"}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def resend_verification_code(request):
+    serializer = ResendVerificationCodeSerializer(data=request.data)
+    # email = request.data.get('email')
+    if serializer.is_valid():
+        email = serializer.validated_data['email']
+        try:
+            user = CustomUser.objects.get(email=email)
+            code = generate_verification_code()
+            store_verification_code(email, code)
+            send_verification_email.delay(email, code)
+            return Response({'detail': 'New verification code sent'}, status=status.HTTP_200_OK)
+        except User.DoesNotExist:
+            return Response({'detail': 'User with this email does not exist'}, status=status.HTTP_404_NOT_FOUND)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# @api_view(['POST'])
+# @permission_classes([IsAuthenticated])
+# def send_chat_email(request, chat_id):
+#     user = request.user
+#     try:
+#         chat = Chat.objects.get(id=chat_id)
+#         if user not in [chat.user1, chat.user2]:
+#             return Response({"detail": "You do not have permission to view this chat."},
+#                             status=status.HTTP_403_FORBIDDEN)
+#
+#         messages = Message.objects.filter(chat=chat).order_by('timestamp')
+#         message_texts = "\n".join([f"{msg.author.email}: {msg.content}" for msg in messages])
+#
+#         subject = f"Chat messages between {chat.user1.email} and {chat.user2.email}"
+#         send_chat_message_email(user.email, subject, message_texts)
+#
+#         return Response({"detail": "Email sent successfully."}, status=status.HTTP_200_OK)
+#     except Chat.DoesNotExist:
+#         return Response({"detail": "Chat not found"}, status=status.HTTP_404_NOT_FOUND)

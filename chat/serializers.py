@@ -5,6 +5,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import authenticate
 from django.contrib.auth import get_user_model
+from custom_user.models import CustomUser
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -13,11 +14,13 @@ class UserSerializer(serializers.ModelSerializer):
     Converts User model instances to JSON format and vice versa.
     """
 
-    # User = get_user_model()
-
     class Meta:
-        model = get_user_model()
-        fields = ['id', 'username', 'email']  # Fields to be included in the serialized output
+        model = CustomUser
+        fields = ['id',
+                  'email',
+                  'first_name',
+                  'last_name'
+                  ]
 
 
 class MessageSerializer(serializers.ModelSerializer):
@@ -35,7 +38,7 @@ class MessageSerializer(serializers.ModelSerializer):
             'author',
             'content',
             'timestamp',
-        ]  # Fields to be included in the serialized output
+        ]
 
 
 class ChatSerializer(serializers.ModelSerializer):
@@ -60,3 +63,29 @@ class ChatSerializer(serializers.ModelSerializer):
         if last_message:
             return MessageSerializer(last_message).data  # Return the serialized last message
         return None  # Return None if there are no messages
+
+
+class RegisterSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomUser
+        fields = ('email', 'password')
+        extra_kwargs = {'password': {'write_only': True}}  # why?
+
+    def create(self, validated_data):
+        user = CustomUser.objects.create_user(email=validated_data['email'], password=validated_data['password'])
+        return user
+
+
+class VerifyCodeSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    code = serializers.CharField(max_length=6)
+
+
+
+class LoginSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
+
+
+class ResendVerificationCodeSerializer(serializers.Serializer):
+    email = serializers.EmailField()

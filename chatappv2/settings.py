@@ -42,8 +42,7 @@ INSTALLED_APPS = [
     'chat',
     'django_filters',
     "debug_toolbar",
-    'django_use_email_as_username.apps.DjangoUseEmailAsUsernameConfig',
-    'custom_user.apps.CustomUserConfig',
+    'custom_user',
 ]
 
 MIDDLEWARE = [
@@ -165,8 +164,8 @@ REST_FRAMEWORK = {
 }
 
 SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(days=7),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=100),
+    "ACCESS_TOKEN_LIFETIME": timedelta(days=50),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1000),
     "ROTATE_REFRESH_TOKENS": False,
     "BLACKLIST_AFTER_ROTATION": False,
     "UPDATE_LAST_LOGIN": False,
@@ -229,11 +228,35 @@ AUTHENTICATION_BACKENDS = (
     'django.contrib.auth.backends.ModelBackend',
 )
 
-AUTH_USER_MODEL = 'custom_user.User'
+AUTH_USER_MODEL = 'custom_user.CustomUser'
 
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
-EMAIL_HOST_USER = 'faxriddinovzuxriddin60@gmail.com'
-EMAIL_HOST_PASSWORD = 'yggd clfu akwk zkkk'
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', 'faxriddinovzuxriddin60@gmail.com')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', 'yggd clfu akwk zkkk')
+# EMAIL_HOST_USER = 'faxriddinovzuxriddin60@gmail.com'
+# EMAIL_HOST_PASSWORD = 'yggd clfu akwk zkkk'
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django_redis.cache.RedisCache',
+        'LOCATION': 'redis://127.0.0.1:6379/1',
+        'OPTIONS': {
+            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+        }
+    }
+}
+
+
+CELERY_BROKER_URL = 'redis://localhost:6379/0'
+CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+
+# TODO rewrite email authentication with your own custom_user without any package.  DONE
+# TODO learn: base user isactive, model manager, DONE
+# BaseUserManager for managing a custom user, and AbstractBaseUser for creating a custom user
+# Model managers are used to query the database and retrieve instances of the model, in our case CustomUser model.
+# By default, django automatically creates managers for all models called objects.
+# TODO email verification with code sent to email. redis use for code verification. DONE
+# TODO docker composeda redis ko'tarish, redis, code expiration 2 minutes. DONE
